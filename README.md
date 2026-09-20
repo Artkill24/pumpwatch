@@ -7,78 +7,114 @@ Legge la bonding curve direttamente dagli account on-chain, quindi
 prezzo, liquidità reale e slippage non sono stime: sono i numeri esatti
 che il programma usa.
 
-## Perché esiste
+## Il risultato principale
 
-Il progetto è nato come strumento di trading. I dati hanno detto di no,
-e questo è diventato il risultato principale.
+Su **7.106 token** con dati completi (snapshot a 30s, 2min, 10min):
 
-**Su 333 token con liquidità reale, seguiti fino a 24 ore:**
-
-| esito | quota |
+| | quota |
 |---|---|
-| ≥ 1.5x dal prezzo a t+10min | 1.2% |
-| ≥ 2x | 0.3% |
-| ≥ 3x | **0%** |
-| ≥ 5x | **0%** |
-| mediana | **1.00x** |
+| liquidità reale sempre sotto 0.1 SOL | 60.0% |
+| mai comprati da nessuno entro t+10min | 42.8% |
+| **liquidità crollata >50% fra t+30s e t+10min** | **13.0%** |
+| liquidità raddoppiata | 4.7% |
+| graduati | 2.4% |
 
-Il moltiplicatore è il *massimo* raggiunto dopo l'ingresso, cioè assume
-di vendere al picco perfetto. Anche con quell'ipotesi generosa, metà dei
-token non supera mai il prezzo di ingresso. Il costo minimo di un giro
-completo (fee pump.fun 1% + 1%, priority fee, slippage) è circa il 5%.
+Ristretto ai soli token che hanno avuto liquidità vera (≥ 1 SOL a t+30s,
+n=1.228): **il 75.4% ne perde più della metà entro dieci minuti.**
 
-E i pochi che salgono sono gli stessi che poi crollano:
+Non serve un modello per dire che un token pump.fun è rischioso. Lo è
+quasi sempre.
 
-2PecSHpJ 1.69x al minuto 90 → liquidità ora 0.00 SOL
-5AeHYnYc 1.32x al minuto 20 → liquidità ora 0.00 SOL
+## Cosa NON funziona: i filtri sul singolo token
 
-
-Il segnale "sta salendo" e il segnale "sta per ruggare" coincidono.
-
-## Cosa invece funziona
-
-Su 16.549 mint raccolti (10.434 con dati completi):
-
-- **87.9%** non ha mai avuto liquidità (sotto 0.1 SOL). pump.fun è quasi
-  interamente rumore: per la grande maggioranza dei lanci non esiste
-  nemmeno un mercato.
-- **51.0%** non viene comprato da nessuno nei primi 10 minuti.
-- **2.5%** raggiunge la graduation.
-- Un filtro identifica i rug meglio del caso:
+Nessuna caratteristica misurata a t+30s separa i rug dal resto. Tutti i
+filtri provati stanno **sotto** la base:
 
 | filtro (a t+30s) | tasso di rug | vs base | n |
 |---|---|---|---|
-| base (liquidità ≥ 1 SOL) | 26.8% | — | 410 |
-| top1 > 50% | 26.4% | −0.4 pt | 401 |
-| top1 > 80% | 22.4% | −4.4 pt | 308 |
-| liquidità > 50 SOL | 38.9% | +12.1 pt | 54 |
-| **liq > 50 SOL e < 10 holder** | **48.0%** | **+21.2 pt** | 25 |
+| base (liquidità ≥ 1 SOL) | 75.4% | — | 1228 |
+| top1 > 50% | 74.2% | −1.2 pt | 1148 |
+| top1 > 80% | 73.3% | −2.1 pt | 836 |
+| meno di 10 holder | 73.7% | −1.7 pt | 819 |
+| liquidità > 50 SOL | 70.5% | −5.0 pt | 88 |
+| liq > 50 SOL e < 10 holder | 66.7% | −8.7 pt | 42 |
 
-La concentrazione degli holder da sola non predice nulla — anzi, va
-leggermente sotto la base. Liquidità alta concentrata in pochissimi
-wallet sì.
+### Un artefatto di misura, e come è stato scoperto
 
-### Una lezione sui campioni piccoli
+Le versioni precedenti di questo README riportavano che il filtro
+`liquidità > 50 SOL` alzava il tasso di rug di **+12 punti**, e il
+risultato aveva perfino **replicato su un secondo dataset indipendente**
+(+14 punti).
 
-Alla prima lettura (n=16) il filtro migliore dava **68.8%**. Raddoppiando
-il campione (n=25) è sceso a **48.0%**, e un terzo filtro che sembrava
-promettente (+12.9 pt) è crollato a +1.2 pt, cioè a zero.
+Era un artefatto dello strumento.
 
-Regressione verso la media. Le direzioni hanno retto, i valori no: è il
-motivo per cui in questo README ogni riga riporta il proprio `n`.
+Il collector limitava i task di campionamento concorrenti con un
+semaforo, ma acquisiva lo slot *prima* di far partire il cronometro. Con
+la coda piena, uno snapshot etichettato "t+30s" veniva in realtà
+prelevato molto più tardi — quando la liquidità si era già mossa. Il
+punto di partenza era sbagliato, e il confronto con t+10min
+sottostimava i crolli in modo non casuale.
 
-Rug catturati mentre accadevano (liquidità reale, t+30s → t+10min):
+Corretto il bug (il cronometro parte alla nascita del token; un
+checkpoint troppo in ritardo viene saltato, non spostato), la copertura
+è passata dal 56% al 70% e il tasso di rug di base dal 32% al 75%. Tutti
+i filtri sul singolo token sono spariti.
 
-HcFFtt7d 1055.60 SOL → 2.95 SOL
-9MuezEGX 812.77 SOL → 0.00 SOL
-4ETyDgTt 164.04 SOL → 0.00 SOL
+**La replica su un campione indipendente non protegge da un errore
+sistematico**: entrambi i dataset erano stati raccolti con lo stesso
+strumento difettoso.
 
+## Cosa funziona: la storia dei wallet
 
-E wallet che lanciano in serie: 391 lanci da un singolo creator,
-155 token consecutivi mai comprati da nessuno da un altro.
+Il segnale che resta non è nel token, è in chi lo lancia. Su creator con
+almeno 40 token tracciati:
 
-*I campioni sono ancora piccoli sulle righe più selettive. Le direzioni
-sono solide, i valori esatti no: vanno letti come ordini di grandezza.*
+```
+4goaRhdG...   127 token    48 rug    113 mai comprati da nessuno
+bwamJzzt...    66 token    34 rug     33 mai comprati
+aH31qjgP...    48 token    30 rug     21 mai comprati
+AjHee8HU...    50 token     8 rug      0 mai comprati
+
+4NNe9CRM...   173 token     1 rug    159 mai comprati
+3zQ81HMt...    76 token     1 rug      1 mai comprati
+9QAEGBhQ...    42 token     0 rug      0 mai comprati
+8o6u9u4a...    64 token     0 rug     64 mai comprati
+```
+
+Tre popolazioni distinte:
+
+- **chi rugga in serie** — decine di rug su decine di lanci
+- **le farm di spam** — centinaia di lanci che nessuno compra mai,
+  quindi non ruggano: muoiono e basta
+- **chi lancia molto senza ruggare** — probabilmente servizi automatici
+
+Questa separazione non dipende dal timing degli snapshot, quindi non è
+vulnerabile all'artefatto descritto sopra. È il pezzo su cui vale la
+pena costruire.
+
+## Sul trading
+
+Il progetto è nato come strumento di trading. Il tracker segue fino a
+24h i token con liquidità vera e registra il **massimo** raggiunto dopo
+t+10min — cioè assume di vendere al picco perfetto.
+
+Su 474 token seguiti (due campioni separati): **zero che fanno 3x**.
+Mediana 1.00x, cioè metà non supera mai il prezzo d'ingresso nemmeno per
+un istante. Il costo minimo di un giro completo (fee pump.fun 1% + 1%,
+priority fee, slippage) è circa il 5%.
+
+E i pochi che salgono sono gli stessi che poi crollano:
+
+```
+2PecSHpJ   1.69x al minuto 90   →  liquidità poi 0.00 SOL
+5AeHYnYc   1.32x al minuto 20   →  liquidità poi 0.00 SOL
+```
+
+Il segnale "sta salendo" e il segnale "sta per ruggare" coincidono.
+
+*Nota: questa misura precede la correzione del bug di timing. La
+direzione è robusta — zero 3x su 474 non diventa un numero buono — ma i
+valori andranno rimisurati.*
 
 ## Componenti
 
@@ -88,7 +124,7 @@ sono solide, i valori esatti no: vanno letti come ordini di grandezza.*
 | `tracker.py` | segue i token con liquidità vera fino a 24h, registra il picco |
 | `curve.py` | decoder della bonding curve: prezzo, liquidità, slippage, progress |
 | `pda.py` | derivazione PDA e ATA in Python puro (nessuna dipendenza nativa) |
-| `analyze.py` | misura l'affidabilità del dataset e il potere predittivo dei filtri |
+| `analyze.py` | affidabilità del dataset e potere predittivo dei filtri |
 | `outcomes.py` | distribuzione dei moltiplicatori |
 | `report.py` | riepilogo rapido |
 
@@ -98,12 +134,13 @@ Solo dipendenze Python pure: gira anche su Termux/Android.
 
 ```bash
 pip install -r requirements.txt
-export HELIUS_API_KEY=...        # chiave gratuita su helius.dev
+cp .env.example .env        # inserisci la chiave, gratuita su helius.dev
+set -a; source .env; set +a
 
-python main.py                   # raccolta
-python tracker.py                # esiti a lungo termine (processo separato)
+python main.py              # raccolta
+python tracker.py           # esiti a lungo termine (processo separato)
 
-python analyze.py                # cosa dicono i dati
+python analyze.py           # cosa dicono i dati
 python outcomes.py
 ```
 
@@ -127,6 +164,10 @@ WantedBy=multi-user.target
 
 ## Note tecniche
 
+- **Il timing degli snapshot è parte della misura.** Il cronometro parte
+  alla nascita del token, prima della coda per uno slot; un checkpoint
+  in ritardo di oltre 15s viene saltato invece che spostato. Senza
+  questo, i dati sono sbagliati in modo silenzioso.
 - Il layout dell'account bonding curve è cambiato tra versioni del
   programma. Verifica `decode_curve` contro l'IDL corrente prima di
   fidarti dei numeri in produzione.
@@ -136,6 +177,8 @@ WantedBy=multi-user.target
   altrimenti ogni token nuovo risulterebbe al 100% di concentrazione.
 - Quando un token gradua, la curva si congela e il mercato passa
   all'AMM: il tracking si chiude lì.
+- La copertura degli snapshot è ~70%. Le analisi usano solo i mint con
+  tutti e tre i punti.
 
 ## Cosa non fa
 

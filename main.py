@@ -36,7 +36,7 @@ RPC_URL = f"https://mainnet.helius-rpc.com/?api-key={API_KEY}"
 
 PUMP_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 SNAPSHOT_OFFSETS = [30, 120, 600]
-MAX_TRACKS = 150
+MAX_TRACKS = 400
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(message)s")
@@ -154,13 +154,23 @@ async def sample_curve(mint):
 
 
 async def track(db, mint):
-    """Snapshot agli offset previsti, poi il task termina."""
+    """
+    Snapshot agli offset previsti, poi il task termina.
+
+    Il cronometro parte SUBITO, prima di mettersi in coda per uno slot:
+    altrimenti con la coda piena si campiona in ritardo salvando
+    l'etichetta sbagliata. Un checkpoint mancato si salta, non si sposta.
+    """
+    t0 = asyncio.get_event_loop().time()
     async with _slots:
-        t0 = asyncio.get_event_loop().time()
         for off in SNAPSHOT_OFFSETS:
-            wait = off - (asyncio.get_event_loop().time() - t0)
+            elapsed = asyncio.get_event_loop().time() - t0
+            wait = off - elapsed
             if wait > 0:
                 await asyncio.sleep(wait)
+            elif wait < -15:
+                # troppo in ritardo: meglio nessun dato che dato falso
+                continue
             try:
                 holders, curve = await asyncio.gather(
                     sample_holders(mint), sample_curve(mint))
