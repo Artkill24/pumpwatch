@@ -1,0 +1,11 @@
+*.db
+*.db-wal
+*.db-shm
+.env
+*.log
+log.txt
+tracker.log
+nohup.out
+__pycache__/
+*.py[cod]
+venv/
