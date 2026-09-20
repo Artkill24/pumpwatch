@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>pumpwatch — wallet score</title>
+<style>
+:root{
+  box-sizing:border-box;
+  padding-top:env(safe-area-inset-top,0px);
+  padding-bottom:env(safe-area-inset-bottom,0px);
+  --bg:#fbfaf8; --fg:#1c1b19; --dim:#6b6862; --line:#e2ded7;
+  --card:#fff; --accent:#1c1b19;
+  --bad:#a3312a; --warn:#946116; --ok:#2f6b46; --neutral:#6b6862;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --bg:#16151a; --fg:#ece9e4; --dim:#97938c; --line:#2c2a30;
+    --card:#1e1d23; --accent:#ece9e4;
+    --bad:#e07a72; --warn:#d6a44a; --ok:#6bb98a; --neutral:#97938c;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#16151a; --fg:#ece9e4; --dim:#97938c; --line:#2c2a30;
+  --card:#1e1d23; --accent:#ece9e4;
+  --bad:#e07a72; --warn:#d6a44a; --ok:#6bb98a; --neutral:#97938c;
+}
+*,*::before,*::after{box-sizing:inherit}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{
+  margin:0; background:var(--bg); color:var(--fg);
+  font:16px/1.55 ui-sans-serif,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:720px; margin:0 auto; padding:32px 20px 64px}
+header{margin-bottom:28px}
+h1{font-size:26px; margin:0 0 6px; letter-spacing:-.02em}
+.sub{color:var(--dim); font-size:14px; margin:0}
+form{display:flex; gap:8px; margin:24px 0 8px}
+input{
+  flex:1; min-width:0; padding:12px 14px; font:inherit; font-size:15px;
+  background:var(--card); color:var(--fg);
+  border:1px solid var(--line); border-radius:8px;
+}
+input:focus{outline:2px solid var(--accent); outline-offset:-1px}
+button{
+  padding:12px 20px; font:inherit; font-weight:600; cursor:pointer;
+  background:var(--accent); color:var(--bg);
+  border:none; border-radius:8px;
+}
+button:disabled{opacity:.5; cursor:default}
+.hint{color:var(--dim); font-size:13px; margin:0 0 28px}
+.card{
+  background:var(--card); border:1px solid var(--line);
+  border-radius:12px; padding:22px; margin-bottom:18px;
+}
+.verdict{font-size:20px; font-weight:700; letter-spacing:-.01em; margin:0 0 4px}
+.v-alto.rischio,.v-alto{color:var(--bad)}
+.v-spam{color:var(--warn)}
+.v-rischio{color:var(--warn)}
+.v-nessun{color:var(--ok)}
+.v-dati,.v-sconosciuto{color:var(--neutral)}
+.addr{
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:12px; color:var(--dim); word-break:break-all; margin:0 0 18px;
+}
+.nums{display:flex; flex-wrap:wrap; gap:26px; margin-bottom:18px}
+.num b{display:block; font-size:22px; font-weight:700; line-height:1.2}
+.num span{font-size:12px; color:var(--dim); text-transform:uppercase; letter-spacing:.04em}
+ul{margin:0; padding-left:18px}
+li{margin-bottom:7px; font-size:14.5px}
+li::marker{color:var(--dim)}
+.risky{width:100%; border-collapse:collapse; font-size:14px; overflow-x:auto; display:block}
+.risky th{text-align:left; font-size:11px; text-transform:uppercase;
+  letter-spacing:.05em; color:var(--dim); padding:0 12px 8px 0; font-weight:600}
+.risky td{padding:7px 12px 7px 0; border-top:1px solid var(--line); white-space:nowrap}
+.risky td:first-child{
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px;
+  cursor:pointer; text-decoration:underline; text-decoration-color:var(--line);
+}
+.scroll{overflow-x:auto}
+h2{font-size:15px; text-transform:uppercase; letter-spacing:.05em;
+  color:var(--dim); margin:34px 0 12px; font-weight:600}
+footer{margin-top:44px; padding-top:20px; border-top:1px solid var(--line);
+  color:var(--dim); font-size:13px}
+footer a{color:inherit}
+.err{color:var(--bad); font-size:14px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>pumpwatch</h1>
+  <p class="sub">Cosa ha già fatto chi ha lanciato questo token.</p>
+</header>
+
+<form id="f">
+  <input id="q" placeholder="indirizzo wallet o mint" autocomplete="off" spellcheck="false">
+  <button id="go">Cerca</button>
+</form>
+<p class="hint" id="stats">caricamento dataset…</p>
+
+<div id="out"></div>
+
+<h2>Wallet con più rug nel dataset</h2>
+<div class="scroll">
+  <table class="risky"><thead><tr>
+    <th>creator</th><th>rug</th><th>con liquidità</th><th>osservati</th>
+  </tr></thead><tbody id="risky"></tbody></table>
+</div>
+
+<footer>
+  Conteggi su dati on-chain raccolti da questo collector. Non è un
+  consiglio finanziario e non predice il prezzo: dice solo cosa è
+  successo ai token precedenti di quel wallet.
+</footer>
+
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s).replace(/[&<>"]/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+async function get(url){
+  const r = await fetch(url);
+  const d = await r.json();
+  if (!r.ok) throw new Error(d.error || 'errore');
+  return d;
+}
+
+function render(p){
+  const cls = 'v-' + p.verdict.split(' ')[0];
+  const pct = v => v === null ? '—' : Math.round(v * 100) + '%';
+  $('#out').innerHTML = `
+    <div class="card">
+      <p class="verdict ${cls}">${esc(p.verdict)}</p>
+      <p class="addr">${esc(p.creator)}</p>
+      <div class="nums">
+        <div class="num"><b>${p.tokens_total}</b><span>token lanciati</span></div>
+        <div class="num"><b>${p.with_liquidity}</b><span>con liquidità</span></div>
+        <div class="num"><b>${p.rugs}</b><span>rug</span></div>
+        <div class="num"><b>${pct(p.rug_rate)}</b><span>tasso rug</span></div>
+      </div>
+      <ul>${p.reasons.map(r => `<li>${esc(r)}</li>`).join('')}</ul>
+    </div>`;
+}
+
+async function lookup(key){
+  if (!key) return;
+  $('#go').disabled = true;
+  $('#out').innerHTML = '<div class="card">ricerca…</div>';
+  try {
+    let p = await get('/api/wallet/' + encodeURIComponent(key));
+    if (p.tokens_total === 0) {
+      try { p = await get('/api/mint/' + encodeURIComponent(key)); }
+      catch (e) { /* resta il profilo vuoto */ }
+    }
+    render(p);
+  } catch (e) {
+    $('#out').innerHTML = `<div class="card err">${esc(e.message)}</div>`;
+  } finally {
+    $('#go').disabled = false;
+  }
+}
+
+$('#f').addEventListener('submit', e => {
+  e.preventDefault();
+  lookup($('#q').value.trim());
+});
+
+get('/api/stats').then(s => {
+  $('#stats').textContent =
+    `${s.mints.toLocaleString('it')} token osservati · ` +
+    `${s.creators.toLocaleString('it')} creator · ` +
+    `${s.measured.toLocaleString('it')} con misure complete`;
+}).catch(() => { $('#stats').textContent = 'dataset non disponibile'; });
+
+get('/api/risky').then(d => {
+  $('#risky').innerHTML = d.wallets.map(w => `
+    <tr><td data-a="${esc(w.creator)}">${esc(w.creator.slice(0,16))}…</td>
+    <td>${w.rugs}</td><td>${w.with_liq}</td><td>${w.measured}</td></tr>`).join('');
+  document.querySelectorAll('.risky td[data-a]').forEach(td => {
+    td.onclick = () => { $('#q').value = td.dataset.a; lookup(td.dataset.a); };
+  });
+}).catch(() => {});
+</script>
+</body>
+</html>
