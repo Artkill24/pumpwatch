@@ -8,8 +8,9 @@ Where the data comes from:
     curve state, so no getTransaction call is needed.
   - curve state at t+30s / 2min / 10min: getMultipleAccounts, up to
     100 bonding curves in a single RPC call.
-  - holders: getTokenLargestAccounts, only for tokens with at least
-    1 SOL of real liquidity (the only ones where holders matter).
+  - holders: derived from the curve and the creator's initial buy,
+    with no RPC call (see cheap_holders). Optional on-chain reads with
+    HOLDER_RPC=1, for RPCs that allow getTokenLargestAccounts.
   - 24h tracking of tokens with a real market: batched curve reads
     every few minutes.
 
@@ -37,6 +38,7 @@ import json
 import logging
 import os
 import time
+from urllib.parse import urlsplit
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -54,6 +56,11 @@ SNAPSHOT_OFFSETS = [int(x) for x in
                     os.environ.get("PP_OFFSETS", "30,120,600").split(",")]
 LATE_TOLERANCE = 15            # seconds; a later snapshot is skipped
 HOLDER_MIN_LIQ = 1.0           # read holders only above this
+# Holder reads via getTokenLargestAccounts are off by default: the public
+# Solana RPC throttles that method almost immediately, and the data shows
+# holder concentration does not separate rugs. Set HOLDER_RPC=1 when
+# running on an RPC that allows it (e.g. a paid Helius plan).
+HOLDER_RPC = os.environ.get("HOLDER_RPC") == "1"
 LONG_TRACK_SECONDS = int(os.environ.get("PP_LONG_SECONDS", 24 * 3600))
 LONG_POLL_SECONDS = int(os.environ.get("PP_LONG_POLL", 180))
 LONG_TRACK_MIN_LIQ = 1.0
@@ -92,8 +99,8 @@ class RPC:
         self.next_at = 0.0
         self.calls = 0
 
-    async def call(self, method, params):
-        for attempt in range(3):
+    async def call(self, method, params, attempts=3):
+        for attempt in range(attempts):
             async with self.lock:
                 wait = self.next_at - time.monotonic()
                 if wait > 0:
@@ -103,7 +110,8 @@ class RPC:
             r = await self.client.post(self.url, json={
                 "jsonrpc": "2.0", "id": 1, "method": method, "params": params})
             if r.status_code == 429:
-                await asyncio.sleep(2 * (attempt + 1))
+                if attempt + 1 < attempts:
+                    await asyncio.sleep(2 * (attempt + 1))
                 continue
             r.raise_for_status()
             d = r.json()
@@ -130,7 +138,9 @@ class RPC:
         return out
 
     async def holders(self, t):
-        res = await self.call("getTokenLargestAccounts", [t.mint])
+        # one attempt only: a missing holder count must never stall
+        # the snapshot round for every other token
+        res = await self.call("getTokenLargestAccounts", [t.mint], attempts=1)
         amts = sorted(
             (float(a.get("uiAmount") or 0) for a in (res or {}).get("value", [])
              if a.get("address") != t.curve_ata
@@ -202,7 +212,7 @@ class Collector:
         self.tokens = {}
         self.dumped = 0
         self.warned = False
-        self.stats = {"new": 0, "snaps": 0, "skipped": 0}
+        self.stats = {"new": 0, "snaps": 0, "skipped": 0, "holder_fail": 0}
 
     def dump(self, raw):
         if self.dumped < DUMP_N:
@@ -276,16 +286,13 @@ class Collector:
                 continue
             if st.real_liquidity_sol >= HOLDER_MIN_LIQ:
                 t.seen_market = True
-            if t.seen_market and off not in HOLDER_OFFSETS:
-                h = {"top1": None, "top5": None, "count": None}
-            elif t.seen_market:
+            # always run: it also keeps max_sold up to date
+            h = t.cheap_holders(st)
+            if HOLDER_RPC and t.seen_market and off in HOLDER_OFFSETS:
                 try:
                     h = await self.rpc.holders(t)
-                except Exception as e:
-                    log.warning("holders %s: %s", t.mint[:8], e)
-                    h = {"top1": None, "top5": None, "count": None}
-            else:
-                h = t.cheap_holders(st)
+                except Exception:
+                    self.stats["holder_fail"] += 1
             await store.save_snapshot(self.db, t.mint, off, now_iso(),
                                       h, curve_dict(st))
             self.stats["snaps"] += 1
@@ -365,11 +372,14 @@ class Collector:
             if time.monotonic() - last_report >= 60:
                 longs = sum(1 for t in self.tokens.values() if t.long)
                 log.info("last 60s: %d new, %d snapshots, %d skipped, "
-                         "%d rpc calls | tracking %d (%d long)",
+                         "%d rpc calls%s | tracking %d (%d long)",
                          self.stats["new"], self.stats["snaps"],
                          self.stats["skipped"], self.rpc.calls,
+                         (f", {self.stats['holder_fail']} holder reads failed"
+                          if self.stats["holder_fail"] else ""),
                          len(self.tokens), longs)
-                self.stats = {"new": 0, "snaps": 0, "skipped": 0}
+                self.stats = {"new": 0, "snaps": 0, "skipped": 0,
+                              "holder_fail": 0}
                 self.rpc.calls = 0
                 last_report = time.monotonic()
             await asyncio.sleep(1)
@@ -403,8 +413,9 @@ async def main():
             checks_done INTEGER DEFAULT 0, next_check_at TEXT,
             started_at TEXT);""")
     await db.commit()
+    # host only: providers put API keys in the path or in the query
     log.info("db ready: %s | rpc: %s", DB_PATH,
-             RPC_URL.split("?")[0])
+             urlsplit(RPC_URL).netloc or "?")
     rpc = RPC(RPC_URL)
     c = Collector(db, rpc)
     try:
