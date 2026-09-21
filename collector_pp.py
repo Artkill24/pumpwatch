@@ -1,61 +1,78 @@
 """
-pumpwatch collector on the PumpPortal data stream.
+pumpwatch collector: PumpPortal free stream + batched RPC reads.
 
-Replaces main.py (Helius polling) and tracker.py (24h curve tracking)
-with a single WebSocket connection and ZERO RPC calls:
+Where the data comes from:
+  - new tokens and migrations: PumpPortal WebSocket, free methods only
+    (subscribeNewToken, subscribeMigration). No API key, no wallet.
+    The create message already carries the creator and the initial
+    curve state, so no getTransaction call is needed.
+  - curve state at t+30s / 2min / 10min: getMultipleAccounts, up to
+    100 bonding curves in a single RPC call.
+  - holders: getTokenLargestAccounts, only for tokens with at least
+    1 SOL of real liquidity (the only ones where holders matter).
+  - 24h tracking of tokens with a real market: batched curve reads
+    every few minutes.
 
-  - new tokens arrive from subscribeNewToken
-  - every buy/sell on a token arrives from subscribeTokenTrade,
-    carrying the bonding curve state after the trade
-  - holders are rebuilt from each trader's balance after every trade,
-    so the count is exact instead of capped at 20
-  - the price peak is seen when it happens, not sampled
+Rough budget at ~26k new tokens/day: ~17k batched curve reads plus
+~9k holder reads, against ~300k calls/day with the old design. That
+fits the public Solana RPC comfortably; on the Helius free plan
+(~33k/day) it fits, but with little headroom.
 
-It writes the same tables as before (mints, snapshots, outcomes), so
-score/, analyze.py, outcomes.py and amm/ keep working unchanged.
+It writes the same tables as before (mints, snapshots, outcomes).
 
-Measurement rule, same as the Helius version: if the connection drops,
-trades are missed and in-memory state is no longer exact. Every token
-alive during a gap is marked tainted and gets no further snapshots.
-Better no data than wrong data.
+Holder counts for tokens under 1 SOL are not read from chain:
+  - if only the creator bought, count = 1 (or 0 if they bought nothing)
+  - if someone else bought, count is stored as NULL (not measured)
+This keeps "never bought by anyone" exact without an RPC call per token.
 
 Usage:  python collector_pp.py
-Env:    PUMPWATCH_DB   database path (default pumpwatch.db)
-        PP_DUMP        save the first N raw messages to pp_sample.jsonl
-                       (default 50) to verify field names
+Env:    RPC_URL        default: public Solana RPC
+        PUMPWATCH_DB   default: pumpwatch.db
+        PP_DUMP        save the first N raw messages (default 50)
 """
 
 import asyncio
+import base64
 import json
 import logging
 import os
 import time
 from datetime import datetime, timedelta, timezone
 
+import httpx
 import websockets
 
 import db as store
+from curve import decode_curve
+from pda import bonding_curve_pda, associated_token_address
 
 WS_URL = os.environ.get("PP_WS_URL", "wss://pumpportal.fun/api/data")
+RPC_URL = os.environ.get("RPC_URL", "https://api.mainnet-beta.solana.com")
 DB_PATH = os.environ.get("PUMPWATCH_DB", "pumpwatch.db")
 
 SNAPSHOT_OFFSETS = [int(x) for x in
                     os.environ.get("PP_OFFSETS", "30,120,600").split(",")]
+LATE_TOLERANCE = 15            # seconds; a later snapshot is skipped
+HOLDER_MIN_LIQ = 1.0           # read holders only above this
 LONG_TRACK_SECONDS = int(os.environ.get("PP_LONG_SECONDS", 24 * 3600))
-LONG_TRACK_MIN_LIQ = 1.0      # follow for 24h only tokens with a real market
-DEAD_LIQ = 0.05               # below this a long-tracked curve is dead
-FLUSH_SECONDS = 60            # how often long-tracking state hits the DB
+LONG_POLL_SECONDS = int(os.environ.get("PP_LONG_POLL", 180))
+LONG_TRACK_MIN_LIQ = 1.0
+DEAD_LIQ = 0.05
+RPC_MIN_INTERVAL = float(os.environ.get("RPC_MIN_INTERVAL", 0.3))
+# Snapshots are collected in rounds so several tokens share one RPC call.
+# A token can be up to this many seconds late (well under LATE_TOLERANCE).
+SNAP_EVERY = float(os.environ.get("PP_SNAP_EVERY", 5))
+# Holders are only read at these offsets: the analyses compare t+30s
+# with t+10min and never use the middle one.
+HOLDER_OFFSETS = {SNAPSHOT_OFFSETS[0], SNAPSHOT_OFFSETS[-1]}
+BATCH = 100
 DUMP_N = int(os.environ.get("PP_DUMP", 50))
 
-# pump.fun bonding curve at creation (UI units: SOL and whole tokens)
-V_SOL_START = 30.0
-V_TOK_START = 1_073_000_000.0
 TOK_SELLABLE = 793_100_000.0
-TOK_VIRTUAL_EXTRA = V_TOK_START - TOK_SELLABLE     # never sold
-TOTAL_SUPPLY = 1_000_000_000.0
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(message)s")
+logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("pp")
 
 
@@ -63,122 +80,135 @@ def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
-class Token:
-    __slots__ = ("mint", "creator", "born", "born_iso", "vsol", "vtok",
-                 "balances", "complete", "tainted", "next_snap",
-                 "long", "entry_price", "max_price", "max_at", "dirty",
-                 "last_flush")
+# ---------------------------------------------------------------- RPC
 
-    def __init__(self, mint, creator, born, born_iso):
+class RPC:
+    """Paced JSON-RPC client: one request every RPC_MIN_INTERVAL seconds."""
+
+    def __init__(self, url):
+        self.url = url
+        self.client = httpx.AsyncClient(timeout=20)
+        self.lock = asyncio.Lock()
+        self.next_at = 0.0
+        self.calls = 0
+
+    async def call(self, method, params):
+        for attempt in range(3):
+            async with self.lock:
+                wait = self.next_at - time.monotonic()
+                if wait > 0:
+                    await asyncio.sleep(wait)
+                self.next_at = time.monotonic() + RPC_MIN_INTERVAL
+            self.calls += 1
+            r = await self.client.post(self.url, json={
+                "jsonrpc": "2.0", "id": 1, "method": method, "params": params})
+            if r.status_code == 429:
+                await asyncio.sleep(2 * (attempt + 1))
+                continue
+            r.raise_for_status()
+            d = r.json()
+            if "error" in d:
+                raise RuntimeError(f"{method}: {d['error']}")
+            return d.get("result")
+        raise RuntimeError(f"{method}: rate limited")
+
+    async def curves(self, tokens):
+        """Curve state for many tokens, 100 per request. {mint: CurveState}"""
+        out = {}
+        for i in range(0, len(tokens), BATCH):
+            chunk = tokens[i:i + BATCH]
+            res = await self.call("getMultipleAccounts",
+                                  [[t.curve_addr for t in chunk],
+                                   {"encoding": "base64"}])
+            for t, acc in zip(chunk, (res or {}).get("value") or []):
+                if acc and acc.get("data"):
+                    try:
+                        out[t.mint] = decode_curve(
+                            base64.b64decode(acc["data"][0]))
+                    except Exception:
+                        pass
+        return out
+
+    async def holders(self, t):
+        res = await self.call("getTokenLargestAccounts", [t.mint])
+        amts = sorted(
+            (float(a.get("uiAmount") or 0) for a in (res or {}).get("value", [])
+             if a.get("address") != t.curve_ata
+             and float(a.get("uiAmount") or 0) > 0),
+            reverse=True)
+        circ = sum(amts)
+        if circ <= 0:
+            return {"top1": None, "top5": None, "count": 0}
+        return {"top1": amts[0] / circ, "top5": sum(amts[:5]) / circ,
+                "count": len(amts)}
+
+
+# -------------------------------------------------------------- state
+
+class Token:
+    __slots__ = ("mint", "creator", "initial_buy", "born", "born_iso",
+                 "curve_addr", "curve_ata", "next_snap", "complete",
+                 "long", "entry_price", "max_price", "max_at",
+                 "seen_market", "max_sold")
+
+    def __init__(self, mint, creator, initial_buy):
         self.mint = mint
         self.creator = creator
-        self.born = born                  # monotonic seconds
-        self.born_iso = born_iso
-        self.vsol = V_SOL_START
-        self.vtok = V_TOK_START
-        self.balances = {}
+        self.initial_buy = initial_buy
+        self.born = time.monotonic()
+        self.born_iso = now_iso()
+        self.curve_addr = bonding_curve_pda(mint)
+        self.curve_ata = associated_token_address(self.curve_addr, mint)
+        self.next_snap = 0
         self.complete = False
-        self.tainted = False
-        self.next_snap = 0                # index into SNAPSHOT_OFFSETS
         self.long = False
         self.entry_price = None
         self.max_price = None
         self.max_at = None
-        self.dirty = False
-        self.last_flush = 0.0
+        self.seen_market = False    # ever had >= HOLDER_MIN_LIQ
+        self.max_sold = 0.0         # most tokens ever out of the curve
 
-    # --- curve ---------------------------------------------------------
-    @property
-    def liq(self):
-        """Real SOL in the curve: everything above the 30 virtual SOL."""
-        return max(self.vsol - V_SOL_START, 0.0)
+    def age(self):
+        return time.monotonic() - self.born
 
-    @property
-    def price(self):
-        return self.vsol / self.vtok if self.vtok > 0 else 0.0
-
-    @property
-    def progress(self):
-        real_tokens = max(self.vtok - TOK_VIRTUAL_EXTRA, 0.0)
-        return min(max((TOK_SELLABLE - real_tokens) / TOK_SELLABLE, 0.0), 1.0)
-
-    # --- holders -------------------------------------------------------
-    def holders(self):
-        amts = sorted((b for b in self.balances.values() if b > 0),
-                      reverse=True)
-        circ = sum(amts)
-        if circ <= 0:
+    def cheap_holders(self, st):
+        """
+        Holders without an RPC call. Only valid for a token that never
+        had a market: after a rug, few tokens are left out of the curve
+        but the buyers still hold them, so the creator-only rule would
+        wrongly report 1 holder.
+        """
+        sold = TOK_SELLABLE * st.progress
+        self.max_sold = max(self.max_sold, sold)
+        if self.max_sold <= self.initial_buy * 1.01 + 1:
+            if self.initial_buy > 0:
+                return {"top1": 1.0, "top5": 1.0, "count": 1}
             return {"top1": None, "top5": None, "count": 0}
-        return {"top1": amts[0] / circ,
-                "top5": sum(amts[:5]) / circ,
-                "count": len(amts)}
+        return {"top1": None, "top5": None, "count": None}
 
-    def curve(self):
-        return {"price": self.price,
-                "mcap": self.price * TOTAL_SUPPLY,
-                "liq": self.liq,
-                "progress": self.progress,
-                "graduated": self.complete or self.progress >= 0.999}
 
-    # --- updates -------------------------------------------------------
-    def apply(self, msg):
-        vs = msg.get("vSolInBondingCurve")
-        vt = msg.get("vTokensInBondingCurve")
-        if vs is not None and vt is not None:
-            self.vsol = float(vs)
-            self.vtok = float(vt)
-        trader = msg.get("traderPublicKey")
-        bal = msg.get("newTokenBalance")
-        if bal is None and msg.get("txType") == "create":
-            bal = msg.get("initialBuy")
-        if trader and bal is not None:
-            self.balances[trader] = float(bal)
-        if self.progress >= 0.999:
-            self.complete = True
-        if self.long and self.entry_price:
-            p = self.price
-            if p > (self.max_price or 0):
-                self.max_price = p
-                self.max_at = int((time.monotonic() - self.born) // 60)
-            self.dirty = True
+def curve_dict(st):
+    return {"price": st.price_sol, "mcap": st.market_cap_sol,
+            "liq": st.real_liquidity_sol, "progress": st.progress,
+            "graduated": st.complete}
 
+
+# ---------------------------------------------------------- collector
 
 class Collector:
-    def __init__(self, db):
+    def __init__(self, db, rpc):
         self.db = db
+        self.rpc = rpc
         self.tokens = {}
-        self.ws = None
-        self.connected = False
         self.dumped = 0
-        self.warned_fields = False
-        self.stats = {"new": 0, "trades": 0, "snaps": 0}
-
-    # --- websocket ----------------------------------------------------
-    async def send(self, payload):
-        if self.ws is not None and self.connected:
-            try:
-                await self.ws.send(json.dumps(payload))
-            except Exception as e:
-                log.warning("send failed: %s", e)
-
-    async def subscribe(self, mints):
-        if mints:
-            await self.send({"method": "subscribeTokenTrade",
-                             "keys": list(mints)})
-
-    async def unsubscribe(self, mints):
-        if mints:
-            await self.send({"method": "unsubscribeTokenTrade",
-                             "keys": list(mints)})
+        self.warned = False
+        self.stats = {"new": 0, "snaps": 0, "skipped": 0}
 
     def dump(self, raw):
-        if self.dumped >= DUMP_N:
-            return
-        with open("pp_sample.jsonl", "a", encoding="utf-8") as f:
-            f.write(raw.strip() + "\n")
-        self.dumped += 1
-        if self.dumped == DUMP_N:
-            log.info("saved %d raw messages to pp_sample.jsonl", DUMP_N)
+        if self.dumped < DUMP_N:
+            with open("pp_sample.jsonl", "a", encoding="utf-8") as f:
+                f.write(raw.strip() + "\n")
+            self.dumped += 1
 
     async def on_message(self, raw):
         self.dump(raw)
@@ -188,98 +218,92 @@ class Collector:
             return
         if not isinstance(msg, dict):
             return
-        tx = msg.get("txType")
-        mint = msg.get("mint")
-        if not tx or not mint:
-            if msg.get("message"):
-                log.info("server: %s", msg["message"])
+        if msg.get("message") and not msg.get("mint"):
+            log.info("server: %s", msg["message"])
             return
-
-        if tx == "create":
-            await self.on_create(msg)
-        elif tx in ("buy", "sell"):
-            t = self.tokens.get(mint)
-            if t:
-                t.apply(msg)
-                self.stats["trades"] += 1
-        elif tx == "migrate":
+        tx, mint = msg.get("txType"), msg.get("mint")
+        if not mint:
+            return
+        if tx == "migrate" or (tx is None and "pool" in msg
+                               and mint in self.tokens):
             t = self.tokens.get(mint)
             if t:
                 t.complete = True
-                t.dirty = True
-
-    async def on_create(self, msg):
-        mint = msg["mint"]
+            return
+        if tx != "create":
+            return
+        pool = msg.get("pool")
+        if pool not in (None, "pump"):
+            return                      # other launchpads: not our curve
         if mint in self.tokens:
             return
-        if not self.warned_fields and (
-                "vSolInBondingCurve" not in msg
-                or "vTokensInBondingCurve" not in msg
-                or "traderPublicKey" not in msg):
-            self.warned_fields = True
-            log.warning("create message without expected fields; "
-                        "keys received: %s", sorted(msg.keys()))
+        if not self.warned and "traderPublicKey" not in msg:
+            self.warned = True
+            log.warning("create message without traderPublicKey; keys: %s",
+                        sorted(msg.keys()))
+        try:
+            t = Token(mint, msg.get("traderPublicKey"),
+                      float(msg.get("initialBuy") or 0))
+        except Exception as e:
+            log.warning("bad mint %s: %s", mint, e)
+            return
+        if await store.save_mint(self.db, mint, t.creator,
+                                 msg.get("signature") or "", None, t.born_iso):
+            self.tokens[mint] = t
+            self.stats["new"] += 1
 
-        t = Token(mint, msg.get("traderPublicKey"),
-                  time.monotonic(), now_iso())
-        t.apply(msg)
-        self.tokens[mint] = t
-        self.stats["new"] += 1
-        inserted = await store.save_mint(self.db, mint, t.creator,
-                                         msg.get("signature") or "", None,
-                                         t.born_iso)
-        if inserted:
-            await self.subscribe([mint])
-
-    # --- scheduler ----------------------------------------------------
-    async def tick(self):
-        """Snapshots, long-tracking flushes and cleanup. Runs every second."""
-        mono = time.monotonic()
-        to_unsub = []
-        for mint, t in list(self.tokens.items()):
-            age = mono - t.born
-
-            # fixed snapshots at 30s / 2min / 10min
-            while (t.next_snap < len(SNAPSHOT_OFFSETS)
-                   and age >= SNAPSHOT_OFFSETS[t.next_snap]):
+    # --- snapshots ------------------------------------------------------
+    async def snapshot_round(self):
+        due = []
+        for t in list(self.tokens.values()):
+            while t.next_snap < len(SNAPSHOT_OFFSETS):
                 off = SNAPSHOT_OFFSETS[t.next_snap]
+                if t.age() < off:
+                    break
                 t.next_snap += 1
-                if t.tainted or not self.connected:
-                    t.tainted = True
+                if t.age() - off > LATE_TOLERANCE:
+                    self.stats["skipped"] += 1      # skip, never shift
                     continue
-                await store.save_snapshot(self.db, mint, off, now_iso(),
-                                          t.holders(), t.curve())
-                self.stats["snaps"] += 1
-                if off == SNAPSHOT_OFFSETS[-1]:
-                    await self.maybe_start_long(t)
-
-            done_snaps = t.next_snap >= len(SNAPSHOT_OFFSETS)
-            if not done_snaps:
+                due.append((t, off))
+                break
+        if not due:
+            return
+        states = await self.rpc.curves([t for t, _ in due])
+        for t, off in due:
+            st = states.get(t.mint)
+            if st is None:
+                self.stats["skipped"] += 1
                 continue
+            if st.real_liquidity_sol >= HOLDER_MIN_LIQ:
+                t.seen_market = True
+            if t.seen_market and off not in HOLDER_OFFSETS:
+                h = {"top1": None, "top5": None, "count": None}
+            elif t.seen_market:
+                try:
+                    h = await self.rpc.holders(t)
+                except Exception as e:
+                    log.warning("holders %s: %s", t.mint[:8], e)
+                    h = {"top1": None, "top5": None, "count": None}
+            else:
+                h = t.cheap_holders(st)
+            await store.save_snapshot(self.db, t.mint, off, now_iso(),
+                                      h, curve_dict(st))
+            self.stats["snaps"] += 1
+            if off == SNAPSHOT_OFFSETS[-1]:
+                await self.maybe_start_long(t, st)
 
-            if not t.long:
-                to_unsub.append(mint)
+        # tokens done with snapshots and not tracked long: forget them
+        for mint, t in list(self.tokens.items()):
+            if t.next_snap >= len(SNAPSHOT_OFFSETS) and not t.long:
                 del self.tokens[mint]
-                continue
 
-            # long tracking: stop at 24h, death, graduation or taint
-            finished = (age >= LONG_TRACK_SECONDS or t.liq < DEAD_LIQ
-                        or t.complete or t.tainted)
-            if finished or (t.dirty and mono - t.last_flush >= FLUSH_SECONDS):
-                await self.flush_long(t, final=finished)
-            if finished:
-                to_unsub.append(mint)
-                del self.tokens[mint]
-
-        await self.unsubscribe(to_unsub)
-
-    async def maybe_start_long(self, t):
-        if t.tainted or t.liq < LONG_TRACK_MIN_LIQ:
+    # --- 24h tracking ---------------------------------------------------
+    async def maybe_start_long(self, t, st):
+        if st.real_liquidity_sol < LONG_TRACK_MIN_LIQ or st.complete:
             return
         t.long = True
-        t.entry_price = t.price
-        t.max_price = t.price
-        t.max_at = int((time.monotonic() - t.born) // 60)
+        t.entry_price = t.max_price = st.price_sol
+        t.max_at = int(t.age() // 60)
         end = (datetime.fromisoformat(t.born_iso)
                + timedelta(seconds=LONG_TRACK_SECONDS)).isoformat()
         await self.db.execute("""
@@ -287,71 +311,84 @@ class Collector:
               (mint, entry_price, entry_liq, max_price, max_at_min,
                last_price, last_liq, graduated, checks_done,
                next_check_at, started_at)
-            VALUES (?,?,?,?,?,?,?,?,0,?,?)""",
-            (t.mint, t.entry_price, t.liq, t.max_price, t.max_at,
-             t.price, t.liq, 1 if t.complete else 0, end, t.born_iso))
+            VALUES (?,?,?,?,?,?,?,0,0,?,?)""",
+            (t.mint, t.entry_price, st.real_liquidity_sol, t.max_price,
+             t.max_at, st.price_sol, st.real_liquidity_sol, end, t.born_iso))
         await self.db.commit()
 
-    async def flush_long(self, t, final):
-        await self.db.execute("""
-            UPDATE outcomes SET max_price=?, max_at_min=?, last_price=?,
-                   last_liq=?, graduated=?, checks_done=checks_done+1,
-                   next_check_at=CASE WHEN ? THEN NULL ELSE next_check_at END
-            WHERE mint=?""",
-            (t.max_price, t.max_at, t.price, t.liq,
-             1 if t.complete else 0, 1 if final else 0, t.mint))
+    async def long_round(self):
+        longs = [t for t in self.tokens.values() if t.long]
+        if not longs:
+            return
+        states = await self.rpc.curves(longs)
+        for t in longs:
+            st = states.get(t.mint)
+            if st is None:
+                continue
+            if st.price_sol > (t.max_price or 0):
+                t.max_price = st.price_sol
+                t.max_at = int(t.age() // 60)
+            complete = t.complete or st.complete
+            finished = (t.age() >= LONG_TRACK_SECONDS
+                        or st.real_liquidity_sol < DEAD_LIQ or complete)
+            await self.db.execute("""
+                UPDATE outcomes SET max_price=?, max_at_min=?, last_price=?,
+                       last_liq=?, graduated=?, checks_done=checks_done+1,
+                       next_check_at=CASE WHEN ? THEN NULL ELSE next_check_at END
+                WHERE mint=?""",
+                (t.max_price, t.max_at, st.price_sol, st.real_liquidity_sol,
+                 1 if complete else 0, 1 if finished else 0, t.mint))
+            if finished:
+                why = ("graduated" if complete else
+                       "dead" if st.real_liquidity_sol < DEAD_LIQ else "24h")
+                log.info("closed %s  max=%.2fx at %smin  (%s)", t.mint[:8],
+                         t.max_price / t.entry_price if t.entry_price else 0,
+                         t.max_at, why)
+                del self.tokens[t.mint]
         await self.db.commit()
-        t.dirty = False
-        t.last_flush = time.monotonic()
-        if final:
-            mult = (t.max_price / t.entry_price) if t.entry_price else 0
-            why = ("graduated" if t.complete else "dead" if t.liq < DEAD_LIQ
-                   else "tainted" if t.tainted else "24h")
-            log.info("closed %s  max=%.2fx at %smin  (%s)",
-                     t.mint[:8], mult, t.max_at, why)
 
+    # --- loops ----------------------------------------------------------
     async def scheduler(self):
+        last_long = time.monotonic()
+        last_snap = 0.0
         last_report = time.monotonic()
         while True:
             try:
-                await self.tick()
+                if time.monotonic() - last_snap >= SNAP_EVERY:
+                    last_snap = time.monotonic()
+                    await self.snapshot_round()
+                if time.monotonic() - last_long >= LONG_POLL_SECONDS:
+                    last_long = time.monotonic()
+                    await self.long_round()
             except Exception as e:
-                log.error("tick failed: %s", e)
+                log.error("round failed: %s", e)
             if time.monotonic() - last_report >= 60:
                 longs = sum(1 for t in self.tokens.values() if t.long)
-                log.info("last 60s: %d new, %d trades, %d snapshots | "
-                         "tracking %d tokens (%d long)",
-                         self.stats["new"], self.stats["trades"],
-                         self.stats["snaps"], len(self.tokens), longs)
-                self.stats = {"new": 0, "trades": 0, "snaps": 0}
+                log.info("last 60s: %d new, %d snapshots, %d skipped, "
+                         "%d rpc calls | tracking %d (%d long)",
+                         self.stats["new"], self.stats["snaps"],
+                         self.stats["skipped"], self.rpc.calls,
+                         len(self.tokens), longs)
+                self.stats = {"new": 0, "snaps": 0, "skipped": 0}
+                self.rpc.calls = 0
                 last_report = time.monotonic()
             await asyncio.sleep(1)
 
-    # --- connection loop ---------------------------------------------
-    async def run(self):
-        asyncio.create_task(self.scheduler())
+    async def stream(self):
         backoff = 1
         while True:
             try:
                 async with websockets.connect(WS_URL, ping_interval=20,
                                               ping_timeout=20,
                                               max_size=4 << 20) as ws:
-                    self.ws = ws
-                    self.connected = True
-                    await self.send({"method": "subscribeNewToken"})
-                    await self.send({"method": "subscribeMigration"})
-                    log.info("connected to PumpPortal")
+                    await ws.send(json.dumps({"method": "subscribeNewToken"}))
+                    await ws.send(json.dumps({"method": "subscribeMigration"}))
+                    log.info("connected to PumpPortal (free streams)")
                     backoff = 1
                     async for raw in ws:
                         await self.on_message(raw)
             except Exception as e:
-                log.error("disconnected (%s), retry in %ss", e, backoff)
-            finally:
-                self.connected = False
-                self.ws = None
-                # every token alive during the gap misses trades
-                for t in self.tokens.values():
-                    t.tainted = True
+                log.error("stream disconnected (%s), retry in %ss", e, backoff)
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 60)
 
@@ -366,9 +403,12 @@ async def main():
             checks_done INTEGER DEFAULT 0, next_check_at TEXT,
             started_at TEXT);""")
     await db.commit()
-    log.info("db ready: %s", DB_PATH)
+    log.info("db ready: %s | rpc: %s", DB_PATH,
+             RPC_URL.split("?")[0])
+    rpc = RPC(RPC_URL)
+    c = Collector(db, rpc)
     try:
-        await Collector(db).run()
+        await asyncio.gather(c.stream(), c.scheduler())
     finally:
         await db.close()
 

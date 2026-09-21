@@ -2,7 +2,10 @@
 # pumpwatch — VPS setup (Ubuntu 22.04/24.04).
 #
 # Run as root on a fresh server:
-#   bash setup_vps.sh
+#   sudo bash setup_vps.sh
+#
+# Works on Oracle Cloud (Ampere ARM or AMD micro), Hetzner,
+# DigitalOcean, Aruba, OVH: anything running Ubuntu.
 #
 # Safe to run again: it updates the code and rewrites the services
 # without touching the database or the .env file.
@@ -22,6 +25,10 @@ id "$USER_NAME" >/dev/null 2>&1 || \
   useradd --system --home "$APP" --shell /usr/sbin/nologin "$USER_NAME"
 
 echo "== code"
+# The folder belongs to the service user, git runs as root: without this
+# git refuses to update it ("dubious ownership") on every rerun.
+git config --global --get-all safe.directory 2>/dev/null | grep -qx "$APP" || \
+  git config --global --add safe.directory "$APP"
 if [ -d "$APP/.git" ]; then
   git -C "$APP" pull --ff-only
 else
@@ -59,28 +66,51 @@ WantedBy=multi-user.target
 EOF
 }
 
-unit collector "$APP"       main.py        "collector"
-unit tracker   "$APP"       tracker.py     "curve tracker"
-unit amm       "$APP/amm"   amm_tracker.py "AMM tracker"
-unit web       "$APP/score" api.py         "web page and API"
+# collector_pp.py streams from PumpPortal and replaces both main.py
+# and tracker.py, with no RPC calls.
+unit collector "$APP"       collector_pp.py "collector (PumpPortal stream)"
+unit amm       "$APP/amm"   amm_tracker.py  "AMM tracker"
+unit web       "$APP/score" api.py          "web page and API"
+
+# the old curve tracker is no longer needed
+if [ -f /etc/systemd/system/pumpwatch-tracker.service ]; then
+  systemctl disable --now -q pumpwatch-tracker || true
+  rm -f /etc/systemd/system/pumpwatch-tracker.service
+fi
 
 systemctl daemon-reload
-systemctl enable -q pumpwatch-collector pumpwatch-tracker pumpwatch-amm pumpwatch-web
+systemctl enable -q pumpwatch-collector pumpwatch-amm pumpwatch-web
 
-echo "== firewall (SSH only)"
-ufw allow OpenSSH >/dev/null
-ufw --force enable >/dev/null
+echo "== firewall"
+if systemctl is-enabled -q netfilter-persistent 2>/dev/null; then
+  # Oracle Cloud images ship their own iptables rules (SSH only).
+  # Enabling ufw on top would conflict with them.
+  echo "   provider firewall detected (netfilter-persistent): leaving it as is"
+else
+  ufw allow OpenSSH >/dev/null
+  ufw --force enable >/dev/null
+  echo "   ufw enabled: SSH only"
+fi
+
+echo "== nightly database backup (keeps 7 days)"
+mkdir -p "$APP/backups"
+chown "$USER_NAME:$USER_NAME" "$APP/backups"
+cat > /etc/cron.d/pumpwatch-backup <<EOF
+# sqlite .backup is safe while the collector is writing
+30 3 * * * $USER_NAME sqlite3 $APP/pumpwatch.db ".backup $APP/backups/pumpwatch-\$(date +\%F).db" && find $APP/backups -name 'pumpwatch-*.db' -mtime +7 -delete
+EOF
+chmod 644 /etc/cron.d/pumpwatch-backup
 
 echo
 if [ ! -f "$APP/.env" ]; then
   echo "Missing: $APP/.env"
-  echo "Copy it from your PC, then run:  systemctl start pumpwatch-{collector,tracker,amm,web}"
+  echo "Copy it from your PC, then run:  systemctl start pumpwatch-{collector,amm,web}"
 elif [ ! -f "$APP/pumpwatch.db" ]; then
   echo "No database yet: a new one will be created on start."
   echo "To keep your existing data, copy pumpwatch.db first."
-  echo "Then run:  systemctl start pumpwatch-{collector,tracker,amm,web}"
+  echo "Then run:  systemctl start pumpwatch-{collector,amm,web}"
 else
-  systemctl restart pumpwatch-collector pumpwatch-tracker pumpwatch-amm pumpwatch-web
+  systemctl restart pumpwatch-collector pumpwatch-amm pumpwatch-web
   echo "All services started."
 fi
 echo
