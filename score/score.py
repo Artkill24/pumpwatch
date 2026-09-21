@@ -1,11 +1,12 @@
 """
-Wallet score: profilo di rischio di un creator pump.fun.
+Wallet score: risk profile of a pump.fun creator.
 
-Non predice se un token salira'. Dice cosa ha fatto in passato chi
-l'ha lanciato: quanti token, quanti ruggati, quanti mai comprati.
+It does not predict whether a token will go up. It reports what the
+creator did before: how many tokens, how many rugged, how many were
+never bought.
 
-Tutto deriva dai dati raccolti da main.py. Nessuna stima, nessun
-modello: sono conteggi.
+Everything comes from data collected by main.py. No estimates, no
+model: just counts.
 """
 
 import os
@@ -14,29 +15,30 @@ from dataclasses import dataclass, asdict
 
 DB_PATH = os.environ.get("PUMPWATCH_DB", "pumpwatch.db")
 
-# Un token conta come rug se aveva liquidita' vera a t+30s e ne ha
-# persa piu' della meta' entro t+10min.
+# A token counts as a rug if it had real liquidity at t+30s and lost
+# more than half of it by t+10min.
 MIN_LIQ = 1.0
 RUG_DROP = 0.5
 
-# Sotto questo numero di token il profilo non e' informativo.
+# Below this many tokens a profile is not informative.
 MIN_TOKENS_FOR_VERDICT = 5
 
 
 @dataclass
 class WalletProfile:
     creator: str
-    tokens_total: int          # token lanciati e osservati
-    tokens_measured: int       # con dati completi (t+30s e t+600s)
-    rugs: int                  # crolli di liquidita'
-    with_liquidity: int        # arrivati ad almeno MIN_LIQ SOL
-    never_bought: int          # nessun holder a t+10min
+    tokens_total: int          # tokens launched and observed
+    tokens_measured: int       # with complete data (t+30s and t+600s)
+    rugs: int                  # liquidity collapses
+    with_liquidity: int        # reached at least MIN_LIQ SOL
+    never_bought: int          # no holders at t+10min
     graduated: int
     rug_rate: float | None     # rugs / with_liquidity
     dead_rate: float | None    # never_bought / tokens_measured
     first_seen: str | None
     last_seen: str | None
     verdict: str
+    verdict_code: str
     reasons: list[str]
 
     def to_dict(self):
@@ -63,8 +65,8 @@ def profile_creator(creator: str, db=None) -> WalletProfile:
         total = row["total"] or 0
         if total == 0:
             return WalletProfile(creator, 0, 0, 0, 0, 0, 0, None, None,
-                                 None, None, "sconosciuto",
-                                 ["Nessun token di questo wallet nel dataset."])
+                                 None, None, "Unknown", "unknown",
+                                 ["No tokens from this wallet in the dataset."])
 
         stats = db.execute(f"""
             SELECT
@@ -91,15 +93,15 @@ def profile_creator(creator: str, db=None) -> WalletProfile:
         rug_rate = (rugs / with_liq) if with_liq else None
         dead_rate = (never / measured) if measured else None
 
-        verdict, reasons = _judge(total, measured, with_liq, rugs,
-                                  never, grad, rug_rate, dead_rate)
+        code, verdict, reasons = _judge(total, measured, with_liq, rugs,
+                                        never, grad, rug_rate, dead_rate)
 
         return WalletProfile(
             creator=creator, tokens_total=total, tokens_measured=measured,
             rugs=rugs, with_liquidity=with_liq, never_bought=never,
             graduated=grad, rug_rate=rug_rate, dead_rate=dead_rate,
             first_seen=row["first_seen"], last_seen=row["last_seen"],
-            verdict=verdict, reasons=reasons)
+            verdict=verdict, verdict_code=code, reasons=reasons)
     finally:
         if own:
             db.close()
@@ -108,66 +110,66 @@ def profile_creator(creator: str, db=None) -> WalletProfile:
 def _judge(total, measured, with_liq, rugs, never, grad,
            rug_rate, dead_rate):
     """
-    Verdetto esplicito. Ogni motivo cita il numero che lo sostiene:
-    chi legge deve poter verificare, non fidarsi.
+    Explicit verdict. Every reason quotes the number behind it:
+    the reader should be able to verify, not trust.
+    Returns (code, label, reasons).
     """
     reasons = []
 
     if measured < MIN_TOKENS_FOR_VERDICT:
         reasons.append(
-            f"Solo {measured} token con dati completi: troppo pochi per "
-            f"un giudizio (ne servono almeno {MIN_TOKENS_FOR_VERDICT}).")
+            f"Only {measured} tokens with complete data: too few for a "
+            f"verdict (at least {MIN_TOKENS_FOR_VERDICT} needed).")
         if total > measured:
             reasons.append(
-                f"{total} token visti in totale, ma {total - measured} "
-                f"senza snapshot completi.")
-        return "dati insufficienti", reasons
+                f"{total} tokens seen in total, {total - measured} "
+                f"without complete snapshots.")
+        return "insufficient", "Not enough data", reasons
 
-    # chi rugga in serie
+    # serial rugger
     if with_liq >= 3 and rug_rate is not None and rug_rate >= 0.5:
         reasons.append(
-            f"{rugs} rug su {with_liq} token che hanno avuto liquidità "
+            f"{rugs} rugs out of {with_liq} tokens that had liquidity "
             f"({rug_rate:.0%}).")
         if total >= 20:
-            reasons.append(f"Wallet molto attivo: {total} token lanciati.")
-        return "alto rischio", reasons
+            reasons.append(f"Very active wallet: {total} tokens launched.")
+        return "high_risk", "High risk", reasons
 
-    # farm di spam: lancia tanto, non lo compra nessuno
+    # spam farm: launches a lot, nobody buys
     if total >= 20 and dead_rate is not None and dead_rate >= 0.8:
         reasons.append(
-            f"{never} token su {measured} non sono stati comprati da "
-            f"nessuno entro 10 minuti ({dead_rate:.0%}).")
+            f"{never} of {measured} tokens were never bought by anyone "
+            f"within 10 minutes ({dead_rate:.0%}).")
         reasons.append(
-            f"{total} lanci complessivi: profilo da farm automatica, "
-            f"non da progetto.")
-        return "spam", reasons
+            f"{total} launches in total: an automated farm, "
+            f"not a project.")
+        return "spam", "Spam", reasons
 
     if with_liq >= 3 and rug_rate is not None and rug_rate >= 0.25:
         reasons.append(
-            f"{rugs} rug su {with_liq} token con liquidità "
+            f"{rugs} rugs out of {with_liq} tokens with liquidity "
             f"({rug_rate:.0%}).")
-        return "rischio medio", reasons
+        return "medium_risk", "Medium risk", reasons
 
-    # nessun segnale negativo
     if with_liq == 0:
         reasons.append(
-            f"Nessuno dei {measured} token misurati ha raggiunto "
-            f"{MIN_LIQ} SOL di liquidità: non c'è stato mercato.")
-        return "nessun mercato", reasons
+            f"None of the {measured} measured tokens reached "
+            f"{MIN_LIQ} SOL of liquidity: there was never a market.")
+        return "no_market", "No market", reasons
 
     reasons.append(
-        f"{rugs} rug su {with_liq} token con liquidità"
+        f"{rugs} rugs out of {with_liq} tokens with liquidity"
         + (f" ({rug_rate:.0%})." if rug_rate is not None else "."))
     if grad:
-        reasons.append(f"{grad} token arrivati alla graduation.")
+        reasons.append(f"{grad} tokens reached graduation.")
     reasons.append(
-        "Nessun segnale negativo nei dati raccolti. Non è una garanzia: "
-        "il dataset copre solo i token osservati da questo collector.")
-    return "nessun segnale negativo", reasons
+        "No negative signals in the collected data. Not a guarantee: "
+        "the dataset only covers tokens this collector observed.")
+    return "clean", "No negative signals", reasons
 
 
 def profile_mint(mint: str, db=None):
-    """Profilo del creator di un dato token."""
+    """Profile of the creator of a given token."""
     own = db is None
     db = db or _connect()
     try:
@@ -182,7 +184,7 @@ def profile_mint(mint: str, db=None):
 
 
 def top_risky(limit=20, db=None):
-    """I wallet con più rug nel dataset."""
+    """Wallets with the most rugs in the dataset."""
     own = db is None
     db = db or _connect()
     try:
@@ -208,6 +210,52 @@ def top_risky(limit=20, db=None):
             db.close()
 
 
+def last_24h(db=None):
+    """
+    What happened on pump.fun in the last 24 hours.
+    Measurements only use tokens with snapshots at t+30s and t+600s.
+    """
+    from datetime import datetime, timedelta, timezone
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    own = db is None
+    db = db or _connect()
+    try:
+        born = db.execute(
+            "SELECT COUNT(*) c FROM mints WHERE seen_at >= ?",
+            (cutoff,)).fetchone()["c"]
+        r = db.execute(f"""
+            SELECT
+              COUNT(*) AS measured,
+              SUM(CASE WHEN a.real_liq_sol >= {MIN_LIQ} THEN 1 ELSE 0 END)
+                AS with_liq,
+              SUM(CASE WHEN a.real_liq_sol >= {MIN_LIQ}
+                        AND b.real_liq_sol < a.real_liq_sol * {RUG_DROP}
+                   THEN 1 ELSE 0 END) AS rugs,
+              SUM(CASE WHEN b.holder_count <= 1 THEN 1 ELSE 0 END)
+                AS never_bought,
+              SUM(CASE WHEN a.progress >= 0.99 THEN 1 ELSE 0 END) AS bundled,
+              SUM(CASE WHEN b.graduated = 1 THEN 1 ELSE 0 END) AS graduated
+            FROM mints m
+            JOIN snapshots a ON a.mint = m.mint AND a.offset_seconds = 30
+            JOIN snapshots b ON b.mint = m.mint AND b.offset_seconds = 600
+            WHERE m.seen_at >= ?""", (cutoff,)).fetchone()
+        with_liq = r["with_liq"] or 0
+        rugs = r["rugs"] or 0
+        return {
+            "born": born,
+            "measured": r["measured"] or 0,
+            "with_liq": with_liq,
+            "rugs": rugs,
+            "rug_rate": (rugs / with_liq) if with_liq else None,
+            "never_bought": r["never_bought"] or 0,
+            "bundled": r["bundled"] or 0,
+            "graduated": r["graduated"] or 0,
+        }
+    finally:
+        if own:
+            db.close()
+
+
 def dataset_stats(db=None):
     own = db is None
     db = db or _connect()
@@ -228,11 +276,11 @@ def dataset_stats(db=None):
 if __name__ == "__main__":
     import sys
     if len(sys.argv) < 2:
-        print("uso: python score.py <wallet|mint>")
-        print("\nWallet più a rischio nel dataset:\n")
+        print("usage: python score.py <wallet|mint>")
+        print("\nRiskiest wallets in the dataset:\n")
         for r in top_risky(10):
-            print(f"  {r['creator']}  {r['rugs']} rug "
-                  f"su {r['with_liq']} con liquidità")
+            print(f"  {r['creator']}  {r['rugs']} rugs "
+                  f"out of {r['with_liq']} with liquidity")
         raise SystemExit
 
     key = sys.argv[1]
@@ -240,14 +288,14 @@ if __name__ == "__main__":
     if p.tokens_total == 0:
         p2 = profile_mint(key)
         if p2:
-            print(f"(creator del token {key})\n")
+            print(f"(creator of token {key})\n")
             p = p2
 
     print(f"wallet   {p.creator}")
-    print(f"verdetto {p.verdict.upper()}")
-    print(f"token    {p.tokens_total} lanciati, {p.tokens_measured} misurati")
+    print(f"verdict  {p.verdict.upper()}")
+    print(f"tokens   {p.tokens_total} launched, {p.tokens_measured} measured")
     if p.with_liquidity:
-        print(f"         {p.with_liquidity} con liquidità, {p.rugs} ruggati")
+        print(f"         {p.with_liquidity} with liquidity, {p.rugs} rugged")
     print()
     for r in p.reasons:
         print(f"  - {r}")

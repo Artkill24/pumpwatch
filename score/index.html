@@ -1,190 +1,284 @@
 <!DOCTYPE html>
-<html lang="it">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>pumpwatch — wallet score</title>
+<title>pumpwatch</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;700;800&display=swap" rel="stylesheet">
 <style>
 :root{
   box-sizing:border-box;
   padding-top:env(safe-area-inset-top,0px);
   padding-bottom:env(safe-area-inset-bottom,0px);
-  --bg:#fbfaf8; --fg:#1c1b19; --dim:#6b6862; --line:#e2ded7;
-  --card:#fff; --accent:#1c1b19;
-  --bad:#a3312a; --warn:#946116; --ok:#2f6b46; --neutral:#6b6862;
+  --paper:#EEF1F4; --ink:#14213D; --dim:#5B6577; --line:#C9D0DA;
+  --panel:#F7F9FB; --rug:#C8102E; --alive:#4F7C6B; --idle:#D5DBE3;
 }
 @media (prefers-color-scheme:dark){
   :root:not([data-theme="light"]){
-    --bg:#16151a; --fg:#ece9e4; --dim:#97938c; --line:#2c2a30;
-    --card:#1e1d23; --accent:#ece9e4;
-    --bad:#e07a72; --warn:#d6a44a; --ok:#6bb98a; --neutral:#97938c;
+    --paper:#0F1626; --ink:#E6EAF0; --dim:#8E98AA; --line:#26304A;
+    --panel:#141D31; --rug:#F0525F; --alive:#7FB3A0; --idle:#243049;
   }
 }
 :root[data-theme="dark"]{
-  --bg:#16151a; --fg:#ece9e4; --dim:#97938c; --line:#2c2a30;
-  --card:#1e1d23; --accent:#ece9e4;
-  --bad:#e07a72; --warn:#d6a44a; --ok:#6bb98a; --neutral:#97938c;
+  --paper:#0F1626; --ink:#E6EAF0; --dim:#8E98AA; --line:#26304A;
+  --panel:#141D31; --rug:#F0525F; --alive:#7FB3A0; --idle:#243049;
 }
 *,*::before,*::after{box-sizing:inherit}
 html{scroll-padding-top:env(safe-area-inset-top,0px)}
 body{
-  margin:0; background:var(--bg); color:var(--fg);
-  font:16px/1.55 ui-sans-serif,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  margin:0; background:var(--paper); color:var(--ink);
+  font-family:"Schibsted Grotesk",ui-sans-serif,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-size:17px; line-height:1.5;
   -webkit-font-smoothing:antialiased;
 }
-.wrap{max-width:720px; margin:0 auto; padding:32px 20px 64px}
-header{margin-bottom:28px}
-h1{font-size:26px; margin:0 0 6px; letter-spacing:-.02em}
-.sub{color:var(--dim); font-size:14px; margin:0}
-form{display:flex; gap:8px; margin:24px 0 8px}
-input{
-  flex:1; min-width:0; padding:12px 14px; font:inherit; font-size:15px;
-  background:var(--card); color:var(--fg);
-  border:1px solid var(--line); border-radius:8px;
-}
-input:focus{outline:2px solid var(--accent); outline-offset:-1px}
-button{
-  padding:12px 20px; font:inherit; font-weight:600; cursor:pointer;
-  background:var(--accent); color:var(--bg);
-  border:none; border-radius:8px;
-}
-button:disabled{opacity:.5; cursor:default}
-.hint{color:var(--dim); font-size:13px; margin:0 0 28px}
-.card{
-  background:var(--card); border:1px solid var(--line);
-  border-radius:12px; padding:22px; margin-bottom:18px;
-}
-.verdict{font-size:20px; font-weight:700; letter-spacing:-.01em; margin:0 0 4px}
-.v-alto.rischio,.v-alto{color:var(--bad)}
-.v-spam{color:var(--warn)}
-.v-rischio{color:var(--warn)}
-.v-nessun{color:var(--ok)}
-.v-dati,.v-sconosciuto{color:var(--neutral)}
-.addr{
-  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
-  font-size:12px; color:var(--dim); word-break:break-all; margin:0 0 18px;
-}
-.nums{display:flex; flex-wrap:wrap; gap:26px; margin-bottom:18px}
-.num b{display:block; font-size:22px; font-weight:700; line-height:1.2}
-.num span{font-size:12px; color:var(--dim); text-transform:uppercase; letter-spacing:.04em}
-ul{margin:0; padding-left:18px}
-li{margin-bottom:7px; font-size:14.5px}
-li::marker{color:var(--dim)}
-.risky{width:100%; border-collapse:collapse; font-size:14px; overflow-x:auto; display:block}
-.risky th{text-align:left; font-size:11px; text-transform:uppercase;
-  letter-spacing:.05em; color:var(--dim); padding:0 12px 8px 0; font-weight:600}
-.risky td{padding:7px 12px 7px 0; border-top:1px solid var(--line); white-space:nowrap}
-.risky td:first-child{
-  font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px;
-  cursor:pointer; text-decoration:underline; text-decoration-color:var(--line);
-}
+.wrap{max-width:760px; margin:0 auto; padding:28px 22px 72px}
+
+/* barra superiore: nome e mercato */
+.top{display:flex; justify-content:space-between; align-items:baseline;
+  flex-wrap:wrap; gap:10px 24px; padding-bottom:18px;
+  border-bottom:1px solid var(--line)}
+.brand{font-weight:800; font-size:19px; letter-spacing:-.01em}
+.market{display:flex; gap:4px 20px; flex-wrap:wrap; font-size:14px; color:var(--dim)}
+.market b{color:var(--ink); font-weight:500}
+table td{font-variant-numeric:tabular-nums}
+.up{color:var(--alive)} .down{color:var(--rug)}
+
+/* apertura: la frase del giorno */
+.hero{padding:56px 0 20px}
+.headline{font-size:clamp(26px,4.4vw,38px); line-height:1.22;
+  letter-spacing:-.02em; margin:0; max-width:30ch; font-weight:500}
+.headline strong{font-weight:800}
+.headline .rug{color:var(--rug); white-space:nowrap}
+.note{margin:18px 0 0; font-size:15px; color:var(--dim); max-width:62ch}
+
+/* griglia: 100 token con un mercato vero */
+.grid{display:grid; grid-template-columns:repeat(20,1fr); gap:4px;
+  max-width:520px; margin:28px 0 10px}
+.grid i{aspect-ratio:1; background:var(--idle); border-radius:2px}
+.grid i.r{background:var(--rug)}
+.grid i.a{background:var(--alive)}
+.legend{font-size:14px; color:var(--dim); display:flex; gap:18px; flex-wrap:wrap}
+.legend span::before{content:""; display:inline-block; width:10px; height:10px;
+  border-radius:2px; margin-right:7px; vertical-align:-1px}
+.legend .lr::before{background:var(--rug)}
+.legend .la::before{background:var(--alive)}
+
+/* ricerca */
+section{padding-top:52px}
+h2{font-size:22px; letter-spacing:-.015em; margin:0 0 6px; font-weight:700}
+.lead{color:var(--dim); margin:0 0 20px; font-size:15.5px; max-width:60ch}
+form{display:flex; gap:8px}
+input{flex:1; min-width:0; padding:13px 15px; font:inherit; font-size:15px;
+  background:var(--panel); color:var(--ink); border:1px solid var(--line); border-radius:4px}
+input::placeholder{color:var(--dim)}
+input:focus-visible,button:focus-visible,td button:focus-visible{
+  outline:2px solid var(--ink); outline-offset:2px}
+button{padding:13px 22px; font:inherit; font-weight:700; cursor:pointer;
+  background:var(--ink); color:var(--paper); border:none; border-radius:4px}
+button:disabled{opacity:.55; cursor:default}
+
+.result{margin-top:22px; padding:22px 24px; background:var(--panel);
+  border-left:4px solid var(--line); border-radius:0 4px 4px 0}
+.result.high_risk{border-left-color:var(--rug)}
+.result.medium_risk,.result.spam{border-left-color:#B7791F}
+.result.clean{border-left-color:var(--alive)}
+.verdict{font-size:24px; font-weight:800; margin:0 0 2px; letter-spacing:-.015em}
+.addr{font-size:13px; color:var(--dim); word-break:break-all; margin:0 0 18px}
+.facts{display:flex; flex-wrap:wrap; gap:8px 28px; margin:0 0 16px; padding:0; list-style:none}
+.facts li{font-size:15px; color:var(--dim)}
+.facts b{color:var(--ink); font-size:20px; font-weight:700; margin-right:5px}
+.reasons{margin:0; padding-left:18px; font-size:15.5px}
+.reasons li{margin-bottom:6px}
+.err{color:var(--rug)}
+
+/* tabella */
 .scroll{overflow-x:auto}
-h2{font-size:15px; text-transform:uppercase; letter-spacing:.05em;
-  color:var(--dim); margin:34px 0 12px; font-weight:600}
-footer{margin-top:44px; padding-top:20px; border-top:1px solid var(--line);
-  color:var(--dim); font-size:13px}
-footer a{color:inherit}
-.err{color:var(--bad); font-size:14px}
+table{width:100%; border-collapse:collapse; font-size:15px}
+th{text-align:left; font-weight:500; color:var(--dim); font-size:14px;
+  padding:0 16px 10px 0; white-space:nowrap}
+td{padding:10px 16px 10px 0; border-top:1px solid var(--line); white-space:nowrap}
+td button{background:none; color:var(--ink); padding:0; font-weight:500;
+  text-decoration:underline; text-decoration-color:var(--line);
+  text-underline-offset:3px; border-radius:0}
+td .bar{display:inline-block; height:8px; background:var(--rug);
+  border-radius:1px; vertical-align:1px; margin-left:8px}
+
+footer{margin-top:64px; padding-top:18px; border-top:1px solid var(--line);
+  font-size:14px; color:var(--dim); max-width:62ch}
+
+@media (max-width:520px){
+  .hero{padding-top:40px}
+  .grid{gap:3px}
+  form{flex-direction:column}
+}
+@media (prefers-reduced-motion:no-preference){
+  .grid i{transition:background .5s ease}
+}
 </style>
 </head>
 <body>
 <div class="wrap">
 
-<header>
-  <h1>pumpwatch</h1>
-  <p class="sub">Cosa ha già fatto chi ha lanciato questo token.</p>
-</header>
-
-<form id="f">
-  <input id="q" placeholder="indirizzo wallet o mint" autocomplete="off" spellcheck="false">
-  <button id="go">Cerca</button>
-</form>
-<p class="hint" id="stats">caricamento dataset…</p>
-
-<div id="out"></div>
-
-<h2>Wallet con più rug nel dataset</h2>
-<div class="scroll">
-  <table class="risky"><thead><tr>
-    <th>creator</th><th>rug</th><th>con liquidità</th><th>osservati</th>
-  </tr></thead><tbody id="risky"></tbody></table>
+<div class="top">
+  <div class="brand">pumpwatch</div>
+  <div class="market" id="market" aria-live="polite"></div>
 </div>
 
-<footer>
-  Conteggi su dati on-chain raccolti da questo collector. Non è un
-  consiglio finanziario e non predice il prezzo: dice solo cosa è
-  successo ai token precedenti di quel wallet.
+<div class="hero">
+  <p class="headline" id="headline">Counting today's tokens.</p>
+  <p class="note" id="note" hidden></p>
+  <div class="grid" id="grid" aria-hidden="true"></div>
+  <div class="legend" id="legend" hidden>
+    <span class="lr">rugged within 10 minutes</span>
+    <span class="la">still standing</span>
+  </div>
+</div>
+
+<section>
+  <h2>Check who launched a token</h2>
+  <p class="lead">Paste a token address or its creator's wallet. See what happened
+    to the other tokens they launched.</p>
+  <form id="f">
+    <label for="q" hidden>Token or creator address</label>
+    <input id="q" placeholder="Token or creator address" autocomplete="off" spellcheck="false">
+    <button id="go">Check</button>
+  </form>
+  <div id="out"></div>
+</section>
+
+<section>
+  <h2>Most rugs</h2>
+  <p class="lead">Creators whose tokens lost more than half their liquidity
+    within ten minutes of launch.</p>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>Creator</th><th>Rugs</th><th>With a market</th></tr></thead>
+      <tbody id="risky"></tbody>
+    </table>
+  </div>
+</section>
+
+<footer id="foot">
+  Data collected on-chain by this collector. A creator who isn't listed
+  isn't clean: they just haven't been observed. None of this predicts a
+  token's price.
 </footer>
 
 </div>
 
 <script>
 const $ = s => document.querySelector(s);
-const esc = s => String(s).replace(/[&<>"]/g, c =>
-  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const esc = s => String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const n = v => Number(v).toLocaleString('en-US');
 
 async function get(url){
-  const r = await fetch(url);
-  const d = await r.json();
-  if (!r.ok) throw new Error(d.error || 'errore');
+  const r = await fetch(url); const d = await r.json();
+  if (!r.ok) throw new Error(d.error || 'Request failed');
   return d;
 }
 
-function render(p){
-  const cls = 'v-' + p.verdict.split(' ')[0];
-  const pct = v => v === null ? '—' : Math.round(v * 100) + '%';
-  $('#out').innerHTML = `
-    <div class="card">
-      <p class="verdict ${cls}">${esc(p.verdict)}</p>
-      <p class="addr">${esc(p.creator)}</p>
-      <div class="nums">
-        <div class="num"><b>${p.tokens_total}</b><span>token lanciati</span></div>
-        <div class="num"><b>${p.with_liquidity}</b><span>con liquidità</span></div>
-        <div class="num"><b>${p.rugs}</b><span>rug</span></div>
-        <div class="num"><b>${pct(p.rug_rate)}</b><span>tasso rug</span></div>
-      </div>
-      <ul>${p.reasons.map(r => `<li>${esc(r)}</li>`).join('')}</ul>
-    </div>`;
+/* mercato */
+function fmtPrice(p){
+  return p >= 100 ? '$' + Math.round(p).toLocaleString('en-US')
+                  : '$' + p.toLocaleString('en-US',{maximumFractionDigits:2});
+}
+async function loadMarket(){
+  try{
+    const m = await get('/api/market');
+    if(!m.available){ $('#market').textContent = ''; return; }
+    $('#market').innerHTML = m.quotes.map(q=>{
+      const c = q.change_24h ?? 0;
+      const cls = c >= 0 ? 'up' : 'down';
+      const sign = c >= 0 ? '+' : '';
+      return `<span>${esc(q.symbol)} <b>${fmtPrice(q.price)}</b>
+        <span class="${cls}">${sign}${c.toFixed(1)}%</span></span>`;
+    }).join('');
+  }catch(e){ $('#market').textContent = ''; }
 }
 
-async function lookup(key){
-  if (!key) return;
-  $('#go').disabled = true;
-  $('#out').innerHTML = '<div class="card">ricerca…</div>';
-  try {
-    let p = await get('/api/wallet/' + encodeURIComponent(key));
-    if (p.tokens_total === 0) {
-      try { p = await get('/api/mint/' + encodeURIComponent(key)); }
-      catch (e) { /* resta il profilo vuoto */ }
+/* frase del giorno + griglia */
+async function loadToday(){
+  try{
+    const t = await get('/api/today');
+    if(!t.with_liq){
+      $('#headline').textContent =
+        `${n(t.born)} tokens were born in the last 24 hours. None has enough data to count yet.`;
+      return;
     }
-    render(p);
-  } catch (e) {
-    $('#out').innerHTML = `<div class="card err">${esc(e.message)}</div>`;
-  } finally {
-    $('#go').disabled = false;
+    const per100 = Math.round((t.rug_rate || 0) * 100);
+    $('#headline').innerHTML =
+      `<strong>${n(t.born)}</strong> tokens were born in the last 24 hours. ` +
+      `Of those with a real market, <strong class="rug">${per100} in 100</strong> ` +
+      `lost it within ten minutes.`;
+    $('#note').textContent =
+      `Counted over ${n(t.with_liq)} tokens that passed 1 SOL of real liquidity. ` +
+      `${n(t.never_bought)} were never bought by anyone; ` +
+      `${n(t.bundled)} were bought out entirely within the first 30 seconds.`;
+    $('#note').hidden = false;
+    $('#grid').innerHTML = Array.from({length:100},(_,i)=>
+      `<i class="${i < per100 ? 'r' : 'a'}"></i>`).join('');
+    $('#legend').hidden = false;
+  }catch(e){
+    $('#headline').textContent = 'The database isn\'t responding. Check that the collector is running.';
   }
 }
 
-$('#f').addEventListener('submit', e => {
-  e.preventDefault();
-  lookup($('#q').value.trim());
-});
+/* ricerca */
+function render(p){
+  const kind = p.verdict_code || '';
+  const pct = v => v == null ? '—' : Math.round(v*100) + '%';
+  $('#out').innerHTML = `
+    <div class="result ${esc(kind)}">
+      <p class="verdict">${esc(p.verdict)}</p>
+      <p class="addr">${esc(p.creator)}</p>
+      <ul class="facts">
+        <li><b>${p.tokens_total}</b>tokens launched</li>
+        <li><b>${p.with_liquidity}</b>with a market</li>
+        <li><b>${p.rugs}</b>rugs</li>
+        <li><b>${pct(p.rug_rate)}</b>of those with a market</li>
+      </ul>
+      <ul class="reasons">${p.reasons.map(r=>`<li>${esc(r)}</li>`).join('')}</ul>
+    </div>`;
+}
+async function lookup(key){
+  if(!key) return;
+  $('#go').disabled = true;
+  $('#out').innerHTML = '<div class="result">Checking…</div>';
+  try{
+    let p = await get('/api/wallet/' + encodeURIComponent(key));
+    if(p.tokens_total === 0){
+      try{ p = await get('/api/mint/' + encodeURIComponent(key)); }catch(e){}
+    }
+    render(p);
+  }catch(e){
+    $('#out').innerHTML = `<div class="result err">${esc(e.message)}</div>`;
+  }finally{ $('#go').disabled = false; }
+}
+$('#f').addEventListener('submit', e=>{ e.preventDefault(); lookup($('#q').value.trim()); });
 
-get('/api/stats').then(s => {
-  $('#stats').textContent =
-    `${s.mints.toLocaleString('it')} token osservati · ` +
-    `${s.creators.toLocaleString('it')} creator · ` +
-    `${s.measured.toLocaleString('it')} con misure complete`;
-}).catch(() => { $('#stats').textContent = 'dataset non disponibile'; });
+/* classifica */
+async function loadRisky(){
+  try{
+    const d = await get('/api/risky');
+    const max = Math.max(1, ...d.wallets.map(w=>w.rugs));
+    $('#risky').innerHTML = d.wallets.slice(0,15).map(w=>`
+      <tr>
+        <td><button data-a="${esc(w.creator)}">${esc(w.creator.slice(0,6))}…${esc(w.creator.slice(-4))}</button></td>
+        <td>${w.rugs}<span class="bar" style="width:${Math.round(w.rugs/max*90)}px"></span></td>
+        <td>${w.with_liq}</td>
+      </tr>`).join('');
+    document.querySelectorAll('#risky button').forEach(b=>{
+      b.onclick = ()=>{ $('#q').value = b.dataset.a; lookup(b.dataset.a);
+        $('#q').scrollIntoView({behavior:'smooth', block:'center'}); };
+    });
+  }catch(e){}
+}
 
-get('/api/risky').then(d => {
-  $('#risky').innerHTML = d.wallets.map(w => `
-    <tr><td data-a="${esc(w.creator)}">${esc(w.creator.slice(0,16))}…</td>
-    <td>${w.rugs}</td><td>${w.with_liq}</td><td>${w.measured}</td></tr>`).join('');
-  document.querySelectorAll('.risky td[data-a]').forEach(td => {
-    td.onclick = () => { $('#q').value = td.dataset.a; lookup(td.dataset.a); };
-  });
-}).catch(() => {});
+loadMarket(); loadToday(); loadRisky();
+setInterval(loadMarket, 60000);
+setInterval(loadToday, 120000);
 </script>
 </body>
 </html>
