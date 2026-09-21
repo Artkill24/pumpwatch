@@ -26,6 +26,9 @@ from market import market
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PORT = int(os.environ.get("PORT", 8000))
+# Local only by default: on a public server, set HOST=0.0.0.0
+# only when you decide to expose the page.
+HOST = os.environ.get("HOST", "127.0.0.1")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -91,5 +94,5 @@ if __name__ == "__main__":
     s = dataset_stats()
     print(f"dataset: {s['mints']} tokens, {s['creators']} creators, "
           f"{s['measured']} measured")
-    print(f"listening on http://localhost:{PORT}")
-    HTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
+    print(f"listening on http://{HOST}:{PORT}")
+    HTTPServer((HOST, PORT), Handler).serve_forever()
