@@ -9,3 +9,4 @@ nohup.out
 __pycache__/
 *.py[cod]
 venv/
+pp_sample.jsonl

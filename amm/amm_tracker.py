@@ -31,7 +31,9 @@ DB_PATH = os.environ.get("PUMPWATCH_DB", "pumpwatch.db")
 RPC_URL = f"https://mainnet.helius-rpc.com/?api-key={API_KEY}"
 
 # Ore dalla graduation in cui ricontrollare.
-CHECKPOINTS_H = [1, 3, 6, 12, 24, 48, 72, 120, 168, 336, 504, 720]
+# Kept short on purpose: this is the only part still using Helius
+# credits, and the free plan allows ~33k per day.
+CHECKPOINTS_H = [1, 6, 24, 72, 168, 336, 720]
 
 LOOP_SECONDS = 120
 BATCH = 20
