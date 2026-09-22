@@ -305,6 +305,50 @@ class Collector:
                 del self.tokens[mint]
 
     # --- 24h tracking ---------------------------------------------------
+    async def resume_long(self):
+        """
+        After a restart, pick up the 24h tracking that was in memory.
+        Rows still inside their 24h window are resumed; older ones are
+        closed with the last values written, so none stays open forever.
+        """
+        cur = await self.db.execute("""
+            SELECT mint, started_at, entry_price, max_price, max_at_min
+            FROM outcomes
+            WHERE next_check_at IS NOT NULL AND entry_price > 0""")
+        rows = await cur.fetchall()
+        resumed = closed = 0
+        now = datetime.now(timezone.utc)
+        for mint, started, entry, mx, mx_at in rows:
+            try:
+                born = datetime.fromisoformat(started)
+                if born.tzinfo is None:
+                    born = born.replace(tzinfo=timezone.utc)
+                age = (now - born).total_seconds()
+            except Exception:
+                age = LONG_TRACK_SECONDS
+            if age >= LONG_TRACK_SECONDS or mint in self.tokens:
+                await self.db.execute(
+                    "UPDATE outcomes SET next_check_at=NULL WHERE mint=?",
+                    (mint,))
+                closed += 1
+                continue
+            try:
+                t = Token(mint, None, 0.0)
+            except Exception:
+                continue
+            t.born = time.monotonic() - age
+            t.born_iso = born.isoformat()
+            t.next_snap = len(SNAPSHOT_OFFSETS)
+            t.seen_market = True
+            t.long = True
+            t.entry_price, t.max_price, t.max_at = entry, mx or entry, mx_at
+            self.tokens[mint] = t
+            resumed += 1
+        await self.db.commit()
+        if rows:
+            log.info("24h tracking: resumed %d tokens, closed %d past 24h",
+                     resumed, closed)
+
     async def maybe_start_long(self, t, st):
         if st.real_liquidity_sol < LONG_TRACK_MIN_LIQ or st.complete:
             return
@@ -418,6 +462,7 @@ async def main():
              urlsplit(RPC_URL).netloc or "?")
     rpc = RPC(RPC_URL)
     c = Collector(db, rpc)
+    await c.resume_long()
     try:
         await asyncio.gather(c.stream(), c.scheduler())
     finally:
